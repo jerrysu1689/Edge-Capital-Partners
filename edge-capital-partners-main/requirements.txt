@@ -1,0 +1,9 @@
+pyyaml
+python-dotenv
+ib_insync
+pyTelegramBotAPI
+certifi
+imapclient
+aiohttp
+pandas
+ccxt
