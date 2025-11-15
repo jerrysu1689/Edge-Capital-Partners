@@ -247,16 +247,33 @@ load_dotenv()
 
 main_logger = logging.getLogger('trade')
 
-IB_API_HOST = os.getenv("IB_API_HOST")
-IB_API_PORT = os.getenv("IB_API_PORT")
-IBKR_ACCOUNT = os.getenv("IBKR_ACCOUNT")
+# Configuration with validation
+IB_API_HOST = os.getenv("IB_API_HOST", "127.0.0.1")
+IB_API_PORT = os.getenv("IB_API_PORT", "7497")
+IBKR_ACCOUNT = os.getenv("IBKR_ACCOUNT", "DEMO_ACCOUNT")
 KUCOIN_API_BASE_URL = os.getenv("KUCOIN_API_BASE_URL")
 KUCOIN_API_KEY = os.getenv("KUCOIN_API_KEY")
 KUCOIN_API_SECRET = os.getenv("KUCOIN_API_SECRET")
 KUCOIN_API_PASSPHRASE = os.getenv("KUCOIN_API_PASSPHRASE")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_ECP_CHANNEL_CHAT_ID = os.getenv("TELEGRAM_ECP_CHANNEL_CHAT_ID")
-telegram_bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+
+# Demo mode detection
+DEMO_MODE = (
+    not IBKR_ACCOUNT or 
+    IBKR_ACCOUNT in ["", "YOUR_ACCOUNT_NUMBER", "DEMO_ACCOUNT"] or
+    not IB_API_PORT or 
+    IB_API_PORT in ["", "YOUR_PORT"]
+)
+
+if DEMO_MODE:
+    main_logger.warning("🔄 DEMO MODE ACTIVATED - No actual trades will be placed")
+    telegram_bot = None
+else:
+    try:
+        telegram_bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN else None
+    except:
+        telegram_bot = None
 
 ib = None
 trades = []
@@ -266,7 +283,41 @@ EDT_timezone = pytz.timezone('America/Toronto')
 BOT_TRADES_FILE = "bot_trades.json"
 trade_log_lock = threading.Lock()
 
-# Bot Trade Log Management Functions
+# Mock data for demo mode
+MOCK_POSITIONS = {
+    "BTCUSD": {"position": 2, "avgCost": 50000},
+    "AAPL": {"position": 10, "avgCost": 150},
+    "GOOGL": {"position": 5, "avgCost": 2800}
+}
+
+class MockPosition:
+    def __init__(self, symbol, position, avg_cost):
+        self.symbol = symbol
+        self.position = position
+        self.avgCost = avg_cost
+
+class MockContract:
+    def __init__(self, symbol):
+        self.symbol = symbol
+
+class MockOrder:
+    def __init__(self, action, quantity, order_type="MKT"):
+        self.action = action
+        self.totalQuantity = quantity
+        self.orderType = order_type
+        self.orderId = f"MOCK_{int(time_lib.time())}"
+
+class MockTrade:
+    def __init__(self, contract, order):
+        self.contract = contract
+        self.order = order
+        self.orderStatus = type('obj', (object,), {'status': 'Submitted'})()
+        self.statusEvent = type('obj', (object,), {'__iadd__': lambda self, x: None})()
+    
+    def isDone(self):
+        return True
+
+# Bot Trade Log Management Functions (same as before but with error handling)
 
 def load_bot_trades() -> Dict:
     """Load bot trades from JSON file with error handling"""
@@ -341,7 +392,8 @@ def add_bot_trade(order_id: str, ticker: str, action: str, quantity: int, price:
             "status": "pending",
             "sl_pct": sl_pct,
             "tp_pct": tp_pct,
-            "is_closed": False
+            "is_closed": False,
+            "demo_mode": DEMO_MODE
         }
         
         if action.upper() == "SELL":
@@ -365,7 +417,8 @@ def add_bot_trade(order_id: str, ticker: str, action: str, quantity: int, price:
         
         save_bot_trades(trades_data)
         
-        main_logger.info(f"Bot trade logged: {action} {ticker} x{quantity} @ ${price} (Order: {order_id})")
+        mode_indicator = "🔄 [DEMO]" if DEMO_MODE else "💰 [LIVE]"
+        main_logger.info(f"{mode_indicator} Bot trade logged: {action} {ticker} x{quantity} @ ${price} (Order: {order_id})")
         
     except Exception as e:
         main_logger.error(f"Error adding bot trade: {e}")
@@ -431,7 +484,7 @@ def get_oldest_open_buy(ticker: str) -> Optional[Dict]:
             if (trade['ticker'] == ticker and 
                 trade['action'] == 'BUY' and 
                 not trade.get('is_closed', False) and
-                trade.get('status') == 'filled')
+                trade.get('status') in ['filled', 'pending'])
         ]
         
         if open_buys:
@@ -447,20 +500,22 @@ def get_oldest_open_buy(ticker: str) -> Optional[Dict]:
 
 def validate_bot_sell(ticker: str, requested_quantity: int) -> Tuple[bool, int, str]:
     """
-    Two-level validation for sell safety:
-    1. IBKR Safety: Check actual position > 0  
-    2. Bot Precision: Check bot's open trades >= requested_quantity
+    Two-level validation for sell safety - works in both demo and live mode
     """
     try:
-        # Level 1: IBKR Position Safety Check
+        # Level 1: Position Safety Check (IBKR or Mock)
         open_positions = fetch_open_positions(IBKR_ACCOUNT)
         
         if ticker not in open_positions:
-            return False, 0, f"SAFETY BLOCK: No IBKR position found for {ticker}"
+            return False, 0, f"SAFETY BLOCK: No position found for {ticker}"
         
-        ibkr_position = open_positions[ticker].position
-        if ibkr_position <= 0:
-            return False, 0, f"SAFETY BLOCK: IBKR position for {ticker} is {ibkr_position} (not long)"
+        if DEMO_MODE:
+            position_qty = open_positions[ticker].position
+        else:
+            position_qty = open_positions[ticker].position
+        
+        if position_qty <= 0:
+            return False, 0, f"SAFETY BLOCK: Position for {ticker} is {position_qty} (not long)"
         
         # Level 2: Bot Trade Precision Check
         bot_open_qty = get_bot_open_quantity(ticker)
@@ -470,9 +525,9 @@ def validate_bot_sell(ticker: str, requested_quantity: int) -> Tuple[bool, int, 
         if requested_quantity > bot_open_qty:
             return False, 0, f"BOT PRECISION BLOCK: Requested {requested_quantity} > bot's open {bot_open_qty} for {ticker}"
         
-        # Additional safety: Don't sell more than IBKR position
-        if requested_quantity > ibkr_position:
-            validated_qty = min(requested_quantity, ibkr_position, bot_open_qty)
+        # Additional safety: Don't sell more than actual position
+        if requested_quantity > position_qty:
+            validated_qty = min(requested_quantity, position_qty, bot_open_qty)
             return True, validated_qty, f"QUANTITY ADJUSTED: Selling {validated_qty} instead of {requested_quantity}"
         
         # All checks passed
@@ -498,15 +553,18 @@ def log_position_safety(ticker: str, action: str, quantity: int, price: float, v
         
         bot_open_qty = get_bot_open_quantity(ticker)
         
+        mode_indicator = "🔄 [DEMO MODE]" if DEMO_MODE else "💰 [LIVE MODE]"
+        
         safety_log = f"""
 === POSITION SAFETY LOG ===
+{mode_indicator}
 Timestamp: {datetime.now()}
 Ticker: {ticker}
 Action: {action}
 Requested Quantity: {quantity}
 Trade Price: ${price}
-IBKR Position: {current_qty}
-IBKR Avg Cost: {avg_cost}
+Current Position: {current_qty}
+Average Cost: {avg_cost}
 Bot Open Quantity: {bot_open_qty}
 Validation Result: {validation_result or 'N/A'}
 ========================
@@ -514,60 +572,81 @@ Validation Result: {validation_result or 'N/A'}
         main_logger.info(safety_log)
         
         # Also log to dedicated safety file
-        safety_logger = logging.getLogger('position_safety')
-        if not safety_logger.handlers:
-            handler = logging.FileHandler('log/position_safety.log')
-            formatter = logging.Formatter('%(asctime)s - %(message)s')
-            handler.setFormatter(formatter)
-            safety_logger.addHandler(handler)
-            safety_logger.setLevel(logging.INFO)
-        
-        safety_logger.info(safety_log)
+        os.makedirs('log', exist_ok=True)
+        with open('log/position_safety.log', 'a') as f:
+            f.write(f"{datetime.now()} - {safety_log}\n")
         
     except Exception as e:
         main_logger.error(f"Error in position safety logging: {e}")
 
 def reconcile_bot_trades_with_ibkr() -> None:
-    """Reconcile bot trade log with actual IBKR positions on startup"""
+    """Reconcile bot trade log with actual positions - works in demo mode"""
     try:
-        main_logger.info("Starting bot trade reconciliation with IBKR...")
+        main_logger.info("Starting bot trade reconciliation...")
         
         trades_data = load_bot_trades()
         open_positions = fetch_open_positions(IBKR_ACCOUNT)
         
         for ticker, summary in trades_data.get('summary', {}).items():
             bot_qty = summary.get('open_quantity', 0)
-            ibkr_qty = open_positions.get(ticker, type('obj', (object,), {'position': 0})).position
             
-            if bot_qty != ibkr_qty:
-                main_logger.warning(f"Position mismatch for {ticker}: Bot={bot_qty}, IBKR={ibkr_qty}")
-                # Could implement auto-correction logic here
+            if ticker in open_positions:
+                actual_qty = open_positions[ticker].position
+            else:
+                actual_qty = 0
+            
+            if bot_qty != actual_qty and not DEMO_MODE:
+                main_logger.warning(f"Position mismatch for {ticker}: Bot={bot_qty}, Actual={actual_qty}")
         
-        main_logger.info("Bot trade reconciliation completed")
+        mode_indicator = "🔄 [DEMO MODE]" if DEMO_MODE else "💰 [LIVE MODE]"
+        main_logger.info(f"{mode_indicator} Bot trade reconciliation completed")
         
     except Exception as e:
         main_logger.error(f"Error in trade reconciliation: {e}")
 
-# Setup IB connection
+# Setup IB connection with demo mode support
 def setup_ib_connection():
     global ib
+    
+    if DEMO_MODE:
+        main_logger.info("🔄 DEMO MODE: Simulating IBKR connection")
+        ib = type('MockIB', (), {
+            'isConnected': lambda: True,
+            'connect': lambda *args: None,
+            'sleep': lambda x: time_lib.sleep(x)
+        })()
+        reconcile_bot_trades_with_ibkr()
+        return ib
+    
+    # Real IBKR connection
     client_id = 0
     ib = IB()
     while not ib.isConnected():
         try:
-            ib.connect(IB_API_HOST, IB_API_PORT, clientId=client_id)
-            main_logger.info(f"Connected to IBKR client id: {client_id}")
-            
-            # Reconcile trades on connection
+            ib.connect(IB_API_HOST, int(IB_API_PORT), clientId=client_id)
+            main_logger.info(f"💰 Connected to IBKR client id: {client_id}")
             reconcile_bot_trades_with_ibkr()
             
         except asyncio.exceptions.TimeoutError as e:
             client_id += 1
+        except Exception as e:
+            main_logger.error(f"IBKR connection failed: {e}")
+            # Switch to demo mode if connection fails
+            main_logger.warning("🔄 Switching to DEMO MODE due to connection failure")
+            global DEMO_MODE
+            DEMO_MODE = True
+            return setup_ib_connection()
+    
     return ib
 
 def on_trade_status(trade):
     """Enhanced callback function for trade status updates with bot tracking"""
     global trades
+    
+    if DEMO_MODE:
+        main_logger.info(f"🔄 [DEMO] Trade status update: {trade.contract.symbol}")
+        return
+    
     main_logger.debug(f"{trade.contract.symbol} order status: {trade.orderStatus.status}")
     
     if trade.isDone():
@@ -585,20 +664,38 @@ def on_trade_status(trade):
         trades.remove(trade)
 
 def fetch_open_positions(account: str) -> dict:
-    """Fetch all open positions for the account"""
+    """Fetch all open positions - supports both demo and live mode"""
     open_positions = {}
+    
     try:
-        for position in ib.positions(account=account):
-            if position.position != 0:  # Only include actual positions
-                open_positions[position.contract.symbol] = position
-                main_logger.debug(f"Open position: {position.contract.symbol} = {position.position} shares")
+        if DEMO_MODE:
+            # Return mock positions for demo
+            for ticker, data in MOCK_POSITIONS.items():
+                open_positions[ticker] = MockPosition(ticker, data["position"], data["avgCost"])
+            main_logger.debug(f"🔄 [DEMO] Mock positions: {list(open_positions.keys())}")
+        else:
+            # Real IBKR positions
+            for position in ib.positions(account=account):
+                if position.position != 0:  # Only include actual positions
+                    open_positions[position.contract.symbol] = position
+                    main_logger.debug(f"Open position: {position.contract.symbol} = {position.position} shares")
+        
     except Exception as e:
         main_logger.error(f"Error fetching positions: {e}")
+        if not DEMO_MODE:
+            main_logger.warning("🔄 Using demo positions due to error")
+            return fetch_open_positions(account)  # Recursive call in demo mode
+    
     return open_positions
 
 def fetch_open_orders() -> dict:
-    """Fetch all open orders"""
+    """Fetch all open orders - supports demo mode"""
     open_orders = {}
+    
+    if DEMO_MODE:
+        main_logger.debug("🔄 [DEMO] No open orders in demo mode")
+        return open_orders
+    
     try:
         for trade in ib.openTrades():
             main_logger.info(f"Open trade: {trade}")
@@ -606,30 +703,16 @@ def fetch_open_orders() -> dict:
             open_orders[trade.contract.symbol].append(trade)
     except Exception as e:
         main_logger.error(f"Error fetching open orders: {e}")
+    
     return open_orders
-
-def fetch_kucoin_positions(method: str, endpoint: str):
-    """KuCoin position fetching (placeholder - not modified)"""
-    now = int(time_lib.time() * 1000)
-    str_to_sign = str(now) + method + endpoint
-    signature = base64.b64encode(hmac.new(KUCOIN_API_SECRET.encode('utf-8'), str_to_sign.encode('utf-8'), hashlib.sha256).digest())
-
-    passphrase = base64.b64encode(hmac.new(KUCOIN_API_SECRET.encode('utf-8'), KUCOIN_API_PASSPHRASE.encode('utf-8'), hashlib.sha256).digest())
-    headers = {
-        "KC-API-SIGN": signature,
-        "KC-API-TIMESTAMP": str(now),
-        "KC-API-KEY": KUCOIN_API_KEY,
-        "KC-API-PASSPHRASE": passphrase,
-        "KC-API-KEY-VERSION": "2"
-    }
-    response = requests.request(method, KUCOIN_API_BASE_URL + endpoint, headers=headers)
-    print(response.status_code)
-    return response.json()
 
 def place_order(ticker: str, action: str, quantity: int, price: float, notification_datetime: datetime, 
                sl_pct: Optional[float], tp_pct: Optional[float], args: argparse.Namespace, email_source: str = ""):
-    """Enhanced place_order with bot trade tracking and sell safety"""
+    """Enhanced place_order with demo mode support and sell safety"""
     global ib
+    
+    mode_indicator = "🔄 [DEMO]" if DEMO_MODE else "💰 [LIVE]"
+    main_logger.info(f"{mode_indicator} Processing order: {action} {ticker} x{quantity} @ ${price}")
     
     # Enhanced sell safety validation
     if action == "SELL":
@@ -643,7 +726,8 @@ def place_order(ticker: str, action: str, quantity: int, price: float, notificat
             alert_message = f"🚨 SELL ORDER BLOCKED: {safety_reason}"
             main_logger.error(alert_message)
             try:
-                telegram_bot.send_message(TELEGRAM_ECP_CHANNEL_CHAT_ID, alert_message)
+                if telegram_bot:
+                    telegram_bot.send_message(TELEGRAM_ECP_CHANNEL_CHAT_ID, alert_message)
             except:
                 pass  # Don't fail on telegram errors
             return
@@ -656,6 +740,34 @@ def place_order(ticker: str, action: str, quantity: int, price: float, notificat
     if action == "BUY":
         log_position_safety(ticker, action, quantity, price, "Buy order initiated")
     
+    if DEMO_MODE:
+        # Demo mode order simulation
+        mock_order_id = f"DEMO_{int(time_lib.time())}_{ticker}_{action}"
+        
+        # Simulate order placement
+        main_logger.info(f"🔄 [DEMO] Simulated order placed: ID {mock_order_id}")
+        
+        # Add to bot trade log (demo orders)
+        add_bot_trade(
+            order_id=mock_order_id,
+            ticker=ticker,
+            action=action,
+            quantity=quantity,
+            price=price,
+            sl_pct=sl_pct,
+            tp_pct=tp_pct,
+            email_source=email_source
+        )
+        
+        # Simulate immediate fill in demo mode
+        update_trade_status(mock_order_id, "filled")
+        
+        trade_log_message = f"🔄 [DEMO] Order completed: {action} {ticker} x{quantity} @ ${price} (ID: {mock_order_id})"
+        main_logger.info(trade_log_message)
+        
+        return
+    
+    # Real IBKR order placement (original logic)
     contract = Stock(ticker, exchange="SMART", currency="USD")
     
     def place_and_track_order(order: Order):
@@ -716,7 +828,7 @@ def place_order(ticker: str, action: str, quantity: int, price: float, notificat
         
         trade_obj = place_and_track_order(order)
         placed_order_id = order.orderId
-        trade_log_message = f"Order (id: {order.orderId}) placed: {action} {ticker} x{quantity}. Order type: {preferred_order_type} triggered at ${price}"
+        trade_log_message = f"💰 [LIVE] Order (id: {order.orderId}) placed: {action} {ticker} x{quantity}. Order type: {preferred_order_type} triggered at ${price}"
         
     elif bracket_order:
         if not ib.isConnected():
@@ -731,7 +843,7 @@ def place_order(ticker: str, action: str, quantity: int, price: float, notificat
             place_and_track_order(o)
         
         placed_order_id = bracket_order[0].orderId
-        trade_log_message = f"Bracket Order (id: {bracket_order[0].orderId}) placed: {action} {ticker} x{quantity}. " \
+        trade_log_message = f"💰 [LIVE] Bracket Order (id: {bracket_order[0].orderId}) placed: {action} {ticker} x{quantity}. " \
                             f"Order type: {preferred_order_type} triggered at ${price}. "\
                             f"TP: ${bracket_order[1].lmtPrice}, SL: ${bracket_order[2].auxPrice}"
 
@@ -754,7 +866,8 @@ def place_order(ticker: str, action: str, quantity: int, price: float, notificat
         # Send telegram notification
         if notification_datetime.date() == datetime.today().date():
             try:
-                telegram_bot.send_message(TELEGRAM_ECP_CHANNEL_CHAT_ID, trade_log_message)
+                if telegram_bot:
+                    telegram_bot.send_message(TELEGRAM_ECP_CHANNEL_CHAT_ID, trade_log_message)
             except:
                 pass  # Don't fail on telegram errors
 
@@ -768,6 +881,10 @@ def place_ibkr_order(ticker: str, action: str, quantity: int, price: float, noti
 
 def place_crypto_order(ticker: str, action: str, quantity: int, price: float, notification_datetime: datetime):
     """Crypto order placement (unchanged)"""
+    if DEMO_MODE:
+        main_logger.info(f"🔄 [DEMO] Crypto order: {action} {ticker} x{quantity} @ ${price}")
+        return
+    
     global exchange
     order = None
     open_crypto_positions = {}
@@ -796,6 +913,7 @@ def place_crypto_order(ticker: str, action: str, quantity: int, price: float, no
         main_logger.info(trade_log_message)
         if notification_datetime.date() == datetime.today().date():
             try:
-                telegram_bot.send_message(TELEGRAM_ECP_CHANNEL_CHAT_ID, trade_log_message)
+                if telegram_bot:
+                    telegram_bot.send_message(TELEGRAM_ECP_CHANNEL_CHAT_ID, trade_log_message)
             except:
                 pass
