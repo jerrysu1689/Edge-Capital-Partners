@@ -1308,7 +1308,7 @@ def setup_ib_connection():
         ib = type('MockIB', (), {
             'isConnected': lambda: True,
             'connect': lambda *args: None,
-            'sleep': lambda x: time_lib.sleep(x)
+            'sleep': lambda x, *args: time_lib.sleep(x)
         })()
         reconcile_bot_trades_with_ibkr()
         return ib

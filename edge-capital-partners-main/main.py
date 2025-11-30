@@ -496,7 +496,66 @@ def trade_on_messages(messages, args: argparse.Namespace):
                 pass
 
 def run_loop(args: argparse.Namespace):
-    """Main email monitoring loop with enhanced error handling"""
+    """Main email monitoring loop with enhanced error handling and demo mode support"""
+    
+    # DEMO MODE CHECK: Prevent infinite loop when no email credentials
+    if not EMAIL_USER or not EMAIL_PASS or EMAIL_USER.strip() == "" or EMAIL_PASS.strip() == "":
+        main_logger.warning("🔄 DEMO MODE: No email credentials provided")
+        main_logger.info("🔄 DEMO MODE: Skipping email monitoring - setting up mock environment")
+        
+        # Set up IBKR connection (will be mock in demo mode)
+        ib = setup_ib_connection()
+        main_logger.info("🔄 DEMO MODE: IBKR connection established")
+        
+        # In demo mode, just keep the process alive for testing
+        main_logger.info("🔄 DEMO MODE: Bot ready for manual testing - no email monitoring")
+        main_logger.info("🔄 DEMO MODE: Use debug tools to test functionality:")
+        main_logger.info("🔄 DEMO MODE: - ./manage_trader.sh debug-email")
+        main_logger.info("🔄 DEMO MODE: - ./manage_trader.sh test-parsing")
+        main_logger.info("🔄 DEMO MODE: - ./manage_trader.sh dashboard")
+        
+        # Keep process alive with periodic status updates
+        retry_count = 0
+        max_demo_cycles = 1440  # 24 hours worth of 1-minute cycles
+        
+        while retry_count < max_demo_cycles:
+            try:
+                time.sleep(60)  # Sleep for 1 minute
+                retry_count += 1
+                
+                # Log status every 10 minutes
+                if retry_count % 10 == 0:
+                    hours = retry_count // 60
+                    main_logger.info(f"🔄 DEMO MODE: Bot active ({hours}h) - email monitoring disabled")
+                
+                # Refresh IBKR connection periodically
+                if retry_count % 60 == 0:  # Every hour
+                    ib = setup_ib_connection()
+                    main_logger.debug("🔄 DEMO MODE: IBKR connection refreshed")
+                    
+            except KeyboardInterrupt:
+                main_logger.info("🔄 DEMO MODE: Bot stopped by user")
+                break
+            except Exception as e:
+                main_logger.error(f"🔄 DEMO MODE: Unexpected error: {e}")
+                time.sleep(30)  # Wait 30 seconds before continuing
+                
+        main_logger.info("🔄 DEMO MODE: Bot shutting down after 24h demo cycle")
+        return
+    
+    # TEMPLATE VALUE CHECK: Prevent infinite loop with template credentials
+    if ("your-email" in EMAIL_USER.lower() or 
+        "your-16-character" in EMAIL_PASS.lower() or
+        len(EMAIL_PASS) != 16):
+        main_logger.error("❌ TEMPLATE CREDENTIALS DETECTED:")
+        main_logger.error("   EMAIL_USER contains 'your-email' or EMAIL_PASS is not 16 characters")
+        main_logger.error("   Please update .env file with real Gmail credentials")
+        main_logger.error("   Bot will not start with template values to prevent infinite loops")
+        return
+    
+    # LIVE MODE: Start email monitoring
+    main_logger.info("💰 LIVE MODE: Starting email monitoring with real credentials")
+    
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
@@ -504,15 +563,29 @@ def run_loop(args: argparse.Namespace):
     ssl_context = ssl.create_default_context(cafile=certifi.where())
     ssl_context.verify_mode = ssl.CERT_REQUIRED
     
-    while True:
+    # Connection retry limits to prevent infinite loops
+    max_connection_retries = 10
+    connection_retry_count = 0
+    consecutive_failures = 0
+    max_consecutive_failures = 5
+    
+    while connection_retry_count < max_connection_retries:
+        mail = None
         try:
+            main_logger.info(f"Attempting email connection (attempt {connection_retry_count + 1}/{max_connection_retries})")
+            
             mail = IMAPClient(EMAIL_HOST, EMAIL_PORT, use_uid=True, ssl=True, ssl_context=ssl_context)
             mail.login(EMAIL_USER, EMAIL_PASS)
             mail.select_folder("INBOX")
             
-            main_logger.info("Connected to email server successfully")
+            main_logger.info("✅ Connected to email server successfully")
+            consecutive_failures = 0  # Reset failure count on successful connection
             
-            while True:
+            # Inner monitoring loop
+            idle_retry_count = 0
+            max_idle_retries = 20
+            
+            while idle_retry_count < max_idle_retries:
                 try:
                     mail.idle()
                     main_logger.info("Waiting for new events...")
@@ -525,23 +598,74 @@ def run_loop(args: argparse.Namespace):
                         if messages:
                             trade_on_messages(messages, args)
                         ib.sleep(2)
+                    
+                    idle_retry_count = 0  # Reset on successful cycle
                         
                 except Exception as e:
-                    main_logger.error(f"Error in email idle loop: {e}")
-                    break  # Break inner loop to reconnect
+                    idle_retry_count += 1
+                    main_logger.error(f"Error in email idle loop (attempt {idle_retry_count}/{max_idle_retries}): {e}")
+                    
+                    if idle_retry_count >= max_idle_retries:
+                        main_logger.error("Too many idle failures - reconnecting to email server")
+                        break
+                    
+                    # Wait before retrying idle
+                    time.sleep(5)
+                    
+        except IMAPClient.Error as e:
+            consecutive_failures += 1
+            connection_retry_count += 1
+            main_logger.error(f"IMAP error (failure {consecutive_failures}): {e}")
+            
+            if "authentication" in str(e).lower() or "login" in str(e).lower():
+                main_logger.error("❌ EMAIL AUTHENTICATION FAILED:")
+                main_logger.error("   - Check Gmail App Password is correct (16 characters)")
+                main_logger.error("   - Verify EMAIL_USER is full email address")
+                main_logger.error("   - Try regenerating Gmail App Password")
+                
+                if consecutive_failures >= 3:
+                    main_logger.error("❌ Too many authentication failures - stopping to prevent account lockout")
+                    break
                     
         except ssl.SSLEOFError as e:
+            consecutive_failures += 1
+            connection_retry_count += 1
             main_logger.error(f"SSL connection error: {e}")
+            
         except Exception as e:
-            main_logger.exception(f"Error occurred: {e}")
+            consecutive_failures += 1
+            connection_retry_count += 1
+            main_logger.exception(f"Unexpected error in email connection: {e}")
+            
         finally:
-            try:
-                mail.logout()
-                main_logger.info("Disconnected from email server")
-            except Exception:
-                pass
-            main_logger.info("Reconnecting to email server in 5 seconds...")
-            ib.sleep(5)
+            # Clean up email connection
+            if mail:
+                try:
+                    mail.logout()
+                    main_logger.info("Disconnected from email server")
+                except Exception as cleanup_error:
+                    main_logger.debug(f"Error during email cleanup: {cleanup_error}")
+        
+        # Check if we should stop retrying
+        if consecutive_failures >= max_consecutive_failures:
+            main_logger.error(f"❌ Too many consecutive failures ({consecutive_failures}) - stopping email monitoring")
+            main_logger.error("   Check your internet connection and email credentials")
+            break
+            
+        if connection_retry_count < max_connection_retries:
+            wait_time = min(30, 5 * consecutive_failures)  # Exponential backoff (max 30 seconds)
+            main_logger.info(f"Reconnecting to email server in {wait_time} seconds...")
+            time.sleep(wait_time)
+    
+    # If we exit the retry loop, log final status
+    if connection_retry_count >= max_connection_retries:
+        main_logger.error("❌ Maximum connection retries exceeded - email monitoring stopped")
+        main_logger.error("   Bot will shut down to prevent infinite loops")
+    elif consecutive_failures >= max_consecutive_failures:
+        main_logger.error("❌ Too many consecutive failures - email monitoring stopped")
+        main_logger.error("   Please check credentials and network connection")
+    
+    main_logger.info("Email monitoring loop ended")
 
 def start_email_listener(args: argparse.Namespace) -> bool:
     """Start the email listener with error handling"""
