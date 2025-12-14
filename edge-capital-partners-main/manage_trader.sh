@@ -631,7 +631,6 @@ full_setup() {
     fi
     echo ""
 }
- Debug orders analysis
 debug_orders_analysis() {
     print_info "Analyzing IBKR order attempts and responses..."
     
@@ -660,7 +659,20 @@ validate_symbols_config() {
     fi
 }
 
-
+# Test IBKR connection and symbol validation
+test_ibkr_connection() {
+    print_info "Testing IBKR connection and symbol validation..."
+    
+    if [ -f "$PROJECT_DIR/test_ibkr.py" ]; then
+        source "$VENV_DIR/bin/activate"
+        # Pass any additional arguments to the test script
+        python3 "$PROJECT_DIR/test_ibkr.py" "$@"
+    else
+        print_error "IBKR test script not found"
+        print_info "Please ensure test_ibkr.py is in your project directory"
+        print_info "This script validates symbols and tests IBKR connection without placing real orders"
+    fi
+}
 show_help() {
     echo "AutoTrader Management Script (Cross-Platform)"
     echo ""

@@ -217,69 +217,7 @@ def build_alert_name_mapping(raw_rows):
     return alert_mapping
 
 
-# def build_trades(raw_rows):
-#     trades = []
-#     failed_rows = []
-#     alert_name_mapping = build_alert_name_mapping(raw_rows)
-#
-#     for row in raw_rows:
-#         description = row.get('Description', '')
-#         if 'ECP' in description:
-#             strategy_name = row.get('Name', '')
-#             if not strategy_name:
-#                 _, _, _, strategy_name, _ = extract_action_price_shares(description, row.get('Ticker', ''))
-#         else:
-#             _, _, _, strategy_name, _ = extract_action_price_shares(description, row.get('Ticker', ''))
-#
-#         action, price, shares, _, ticker_parsed = extract_action_price_shares(description, row.get('Ticker', ''))
-#
-#         if action and price:
-#             if not ticker_parsed and 'Ticker' in row:
-#                 ticker_parts = row['Ticker'].split(':')
-#                 if len(ticker_parts) > 1:
-#                     ticker_parsed = ticker_parts[-1].split(',')[0].strip()
-#                 else:
-#                     ticker_parsed = row['Ticker'].split(',')[0].strip()
-#
-#             timestamp = None
-#             if 'Time' in row and row['Time']:
-#                 timestamp = get_timestamp(row['Time'])
-#             if not timestamp:
-#                 timestamp = extract_time_from_description(row.get('Description', ''))
-#             if not timestamp:
-#                 timestamp = datetime.now()
-#
-#             alert_id = row.get('Alert ID')
-#             standardized_alert_name = ""
-#             if alert_id and alert_id in alert_name_mapping:
-#                 standardized_alert_name = alert_name_mapping[alert_id]['name']
-#
-#             trade = {
-#                 'Alert ID': alert_id,
-#                 'DateTime': timestamp,
-#                 'Date': timestamp.strftime('%Y-%m-%d'),
-#                 'Ticker': ticker_parsed,
-#                 'Action': action,
-#                 'Price': price,
-#                 'Strategy': strategy_name,
-#                 'Alert Name': standardized_alert_name,
-#                 'Actual Shares': shares  # Store actual shares as metadata only
-#             }
-#
-#             timeframe = extract_timeframe_from_ticker(row.get('Ticker', ''))
-#             if timeframe:
-#                 trade['Timeframe'] = timeframe
-#
-#             trades.append(trade)
-#         else:
-#             failed_rows.append(row.get('Description', 'Unknown description'))
-#
-#     if failed_rows:
-#         print(f"Failed to extract trade info from {len(failed_rows)} alerts.")
-#
-#     trades = [t for t in trades if 'Ticker' in t and t['Ticker']]
-#     trades.sort(key=lambda x: (x.get('Alert ID', ''), x.get('Ticker', ''), x.get('DateTime', datetime.min)))
-#     return trades
+
 
 def build_trades(raw_rows):
     trades = []
@@ -356,186 +294,7 @@ def build_trades(raw_rows):
     return trades
 
 
-# def match_buys_and_sells_state_based(trades):
-#     """
-#     State-based matching: Track position state chronologically
-#     - All shares treated as 1
-#     - Match on Alert ID + Ticker + Timestamp
-#     - IGNORES any SELLs that occur before the first BUY
-#     - Complete order = BUY first, then SELL
-#     """
-#     closed_trades = []
-#     open_positions = []
-#
-#     # Group by Alert ID + Ticker
-#     trade_groups = {}
-#     for trade in trades:
-#         alert_id = trade.get('Alert ID', 'unknown')
-#         ticker = trade.get('Ticker', '')
-#
-#         key = (alert_id, ticker)
-#         if key not in trade_groups:
-#             trade_groups[key] = []
-#         trade_groups[key].append(trade)
-#
-#     print(f"\nProcessing {len(trade_groups)} unique Alert ID + Ticker combinations...")
-#
-#     for (alert_id, ticker), group_trades in trade_groups.items():
-#         # Sort by datetime (including seconds) - critical for accuracy
-#         group_trades.sort(key=lambda x: x.get('DateTime', datetime.min))
-#
-#         # NEW: Find first BUY and ignore any SELLs before it
-#         first_buy_index = None
-#         for idx, trade in enumerate(group_trades):
-#             if trade['Action'] == 'Buy':
-#                 first_buy_index = idx
-#                 break
-#
-#         # If no BUY found at all, skip this entire group
-#         if first_buy_index is None:
-#             print(f"Warning: Alert {alert_id}, Ticker {ticker} has no BUY orders. Skipping.")
-#             continue
-#
-#         # Start processing from the first BUY onwards (ignore earlier SELLs)
-#         if first_buy_index > 0:
-#             skipped_sells = first_buy_index
-#             print(f"Alert {alert_id}, Ticker {ticker}: Skipped {skipped_sells} SELL order(s) before first BUY")
-#
-#         group_trades = group_trades[first_buy_index:]
-#
-#         # State machine variables
-#         position = 0  # 0 = flat, +1 = long, -1 = short
-#         entry_trade = None
-#
-#         for trade in group_trades:
-#             action = trade['Action']
-#
-#             # Treat all trades as 1 share (ignore actual shares)
-#             shares = 1
-#             price = trade['Price']
-#
-#             if action == 'Buy':
-#                 if position == 0:
-#                     # Opening long position
-#                     position = 1
-#                     entry_trade = trade
-#
-#                 elif position == -1:
-#                     # Closing short position
-#                     buy_date_str = trade['Date']
-#                     sell_date_str = entry_trade['Date']
-#                     buy_price = price
-#                     sell_price = entry_trade['Price']
-#
-#                     # For shorts: opened with sell, closed with buy
-#                     try:
-#                         d1 = datetime.strptime(sell_date_str, '%Y-%m-%d')
-#                         d2 = datetime.strptime(buy_date_str, '%Y-%m-%d')
-#                         days_in_market = (d2 - d1).days
-#                     except ValueError:
-#                         days_in_market = 0
-#
-#                     # Short P&L: sell high, buy low
-#                     cost = sell_price * shares
-#                     pnl = (sell_price - buy_price) * shares
-#                     ret_pct = (pnl / cost) * 100 if cost != 0 else 0
-#
-#                     result = {
-#                         'Alert ID': alert_id,
-#                         'Trading Date': sell_date_str,
-#                         'Closing Date': buy_date_str,
-#                         'Ticker': ticker,
-#                         'Open': round(sell_price, 2),
-#                         'Closing': round(buy_price, 2),
-#                         'Shares': shares,
-#                         'Cost': round(cost, 2),
-#                         'PnL': round(pnl, 2),
-#                         'Return(%)': round(ret_pct, 2),
-#                         'Average Day in the Market': days_in_market,
-#                         'Outcome': 'Win' if ret_pct > 0 else 'Loss',
-#                         'Status': 'Closed'
-#                     }
-#
-#                     for field in ['Strategy', 'Timeframe', 'Alert Name']:
-#                         if field in entry_trade:
-#                             result[field] = entry_trade[field]
-#
-#                     closed_trades.append(result)
-#                     position = 0
-#                     entry_trade = None
-#
-#             elif action == 'Sell':
-#                 if position == 0:
-#                     # Opening short position
-#                     position = -1
-#                     entry_trade = trade
-#
-#                 elif position == 1:
-#                     # Closing long position
-#                     buy_date_str = entry_trade['Date']
-#                     sell_date_str = trade['Date']
-#                     buy_price = entry_trade['Price']
-#                     sell_price = price
-#
-#                     try:
-#                         d1 = datetime.strptime(buy_date_str, '%Y-%m-%d')
-#                         d2 = datetime.strptime(sell_date_str, '%Y-%m-%d')
-#                         days_in_market = (d2 - d1).days
-#                     except ValueError:
-#                         days_in_market = 0
-#
-#                     # Long P&L: buy low, sell high
-#                     cost = buy_price * shares
-#                     pnl = (sell_price - buy_price) * shares
-#                     ret_pct = (pnl / cost) * 100 if cost != 0 else 0
-#
-#                     result = {
-#                         'Alert ID': alert_id,
-#                         'Trading Date': buy_date_str,
-#                         'Closing Date': sell_date_str,
-#                         'Ticker': ticker,
-#                         'Open': round(buy_price, 2),
-#                         'Closing': round(sell_price, 2),
-#                         'Shares': shares,
-#                         'Cost': round(cost, 2),
-#                         'PnL': round(pnl, 2),
-#                         'Return(%)': round(ret_pct, 2),
-#                         'Average Day in the Market': days_in_market,
-#                         'Outcome': 'Win' if ret_pct > 0 else 'Loss',
-#                         'Status': 'Closed'
-#                     }
-#
-#                     for field in ['Strategy', 'Timeframe', 'Alert Name']:
-#                         if field in entry_trade:
-#                             result[field] = entry_trade[field]
-#
-#                     closed_trades.append(result)
-#                     position = 0
-#                     entry_trade = None
-#
-#         # Any remaining open position
-#         if position != 0 and entry_trade is not None:
-#             open_position = {
-#                 'Alert ID': alert_id,
-#                 'Entry Date': entry_trade['Date'],
-#                 'Ticker': ticker,
-#                 'Entry Price': round(entry_trade['Price'], 2),
-#                 'Shares': 1,
-#                 'Cost Basis': round(entry_trade['Price'], 2),
-#                 'Days Held': (datetime.now() - entry_trade['DateTime']).days,
-#                 'Status': 'Open',
-#                 'Position Type': 'Long' if position == 1 else 'Short',
-#                 'Strategy': entry_trade.get('Strategy', ''),
-#                 'Timeframe': entry_trade.get('Timeframe', ''),
-#                 'Alert Name': entry_trade.get('Alert Name', '')
-#             }
-#             open_positions.append(open_position)
-#
-#     print(f"\nState-Based Matching Summary:")
-#     print(f"  Closed trades: {len(closed_trades)}")
-#     print(f"  Open positions: {len(open_positions)}")
-#
-#     return closed_trades, open_positions
+
 
 def match_buys_and_sells_state_based(trades):
     """
@@ -682,12 +441,43 @@ def match_buys_and_sells_state_based(trades):
 
     return closed_trades, open_positions
 
+def calculate_compounded_principle(df):
+    """
+    Calculate compounded principle starting at $100,000 for each Alert ID
+    Formula: Previous Value × (1 + Return% / 100)
+    """
+    df['Principle'] = 0.0
+    
+    # Group by Alert ID
+    for alert_id in df['Alert ID'].unique():
+        mask = df['Alert ID'] == alert_id
+        alert_trades = df[mask].copy()
+        
+        # Sort by Trading Date to ensure chronological order
+        alert_trades = alert_trades.sort_values('Trading Date')
+        
+        # Calculate compounded principle
+        principle_values = []
+        current_principle = 100000.0  # Start with $100,000
+        
+        for idx, row in alert_trades.iterrows():
+            return_pct = row['Return(%)']
+            principle_values.append(current_principle)
+            # Calculate next principle: current × (1 + return%)
+            current_principle = current_principle * (1 + return_pct / 100)
+        
+        # Assign back to dataframe
+        df.loc[alert_trades.index, 'Principle'] = principle_values
+    
+    return df
+
+
 def build_final_dataframe(closed_trades):
     standard_columns = [
         'Alert ID', 'Alert Name', 'Trading Date', 'Closing Date', 'Ticker',
         'Open', 'Closing', 'Shares', 'Cost', 'PnL', 'Return(%)',
         'Average Day in the Market', 'Outcome', 'Status', 'Strategy', 'Timeframe',
-        'Actual Buy Shares', 'Actual Sell Shares'
+        'Actual Buy Shares', 'Actual Sell Shares', 'Principle'  # Added Principle
     ]
 
     df = pd.DataFrame(closed_trades)
@@ -696,11 +486,34 @@ def build_final_dataframe(closed_trades):
         if col not in df.columns:
             df[col] = None
 
+    # Calculate Compounded Principle for each Alert ID
+    df = calculate_compounded_principle(df)
+
     available_standard_cols = [col for col in standard_columns if col in df.columns]
     additional_cols = [col for col in df.columns if col not in standard_columns]
     df = df[available_standard_cols + additional_cols]
 
     return df
+
+# def build_final_dataframe(closed_trades):
+#     standard_columns = [
+#         'Alert ID', 'Alert Name', 'Trading Date', 'Closing Date', 'Ticker',
+#         'Open', 'Closing', 'Shares', 'Cost', 'PnL', 'Return(%)',
+#         'Average Day in the Market', 'Outcome', 'Status', 'Strategy', 'Timeframe',
+#         'Actual Buy Shares', 'Actual Sell Shares'
+#     ]
+
+#     df = pd.DataFrame(closed_trades)
+
+#     for col in standard_columns:
+#         if col not in df.columns:
+#             df[col] = None
+
+#     available_standard_cols = [col for col in standard_columns if col in df.columns]
+#     additional_cols = [col for col in df.columns if col not in standard_columns]
+#     df = df[available_standard_cols + additional_cols]
+
+#     return df
 
 
 def process_alerts_to_dataframe(input_file):
@@ -867,8 +680,107 @@ def create_formatted_excel_pivot(df, writer, sheet_name='Pivot'):
     return pivot_df
 
 
+# def create_alert_id_performance(df_closed, df_open):
+#     """Enhanced with open position tracking"""
+#     if 'Alert ID' not in df_closed.columns or df_closed['Alert ID'].isna().all():
+#         return pd.DataFrame()
+
+#     alert_groups = df_closed.groupby(
+#         ['Alert ID', 'Alert Name']) if 'Alert Name' in df_closed.columns else df_closed.groupby(['Alert ID'])
+#     alert_performance_data = []
+
+#     for group_key, group_data in alert_groups:
+#         if isinstance(group_key, tuple):
+#             alert_id, alert_name = group_key
+#         else:
+#             alert_id = group_key
+#             alert_name = ""
+
+#         # Count open positions for this Alert ID
+#         open_count = len(df_open[df_open['Alert ID'] == alert_id]) if len(df_open) > 0 else 0
+
+#         group_data_sorted = group_data.sort_values('Trading Date')
+#         first_trade = group_data_sorted.iloc[0]
+#         last_trade = group_data_sorted.iloc[-1]
+
+#         total_pnl = group_data['PnL'].sum()
+#         avg_return = group_data['Return(%)'].mean()
+#         total_cost = group_data['Cost'].sum()
+#         win_count = len(group_data[group_data['Outcome'] == 'Win'])
+#         total_trades = len(group_data)
+#         win_rate = (win_count / total_trades) * 100 if total_trades > 0 else 0
+#         avg_days_in_market = group_data['Average Day in the Market'].mean()
+
+#         first_trade_cost = first_trade['Cost']
+#         if first_trade_cost > 0:
+#             total_return = (total_pnl / first_trade_cost) * 100
+#         else:
+#             total_return = 0
+
+#         first_open_price = first_trade['Open']
+#         last_close_price = last_trade['Closing']
+
+#         if first_open_price > 0:
+#             buy_hold_return = ((last_close_price / first_open_price) - 1) * 100
+#         else:
+#             buy_hold_return = 0
+
+#         difference = total_return - buy_hold_return
+
+#         win_data = group_data[group_data['Outcome'] == 'Win']
+#         loss_data = group_data[group_data['Outcome'] == 'Loss']
+
+#         avg_win_amount = win_data['PnL'].mean() if len(win_data) > 0 else 0
+#         avg_loss_amount = loss_data['PnL'].mean() if len(loss_data) > 0 else 0
+#         avg_win_percent = win_data['Return(%)'].mean() if len(win_data) > 0 else 0
+#         avg_loss_percent = loss_data['Return(%)'].mean() if len(loss_data) > 0 else 0
+
+#         rr_dollar = abs(avg_win_amount / avg_loss_amount) if avg_loss_amount != 0 else 0
+#         rr_percent = abs(avg_win_percent / avg_loss_percent) if avg_loss_percent != 0 else 0
+
+#         best_trade_pnl = group_data['PnL'].max()
+#         worst_trade_pnl = group_data['PnL'].min()
+#         best_trade_percent = group_data['Return(%)'].max()
+#         worst_trade_percent = group_data['Return(%)'].min()
+
+#         alert_performance_data.append({
+#             'Alert ID': alert_id,
+#             'Alert Name': alert_name,
+#             'Closed Trades': total_trades,
+#             'Open Positions': open_count,
+#             'Total PnL': round(total_pnl, 2),
+#             'Average Return(%)': round(avg_return, 2),
+#             'Total Return (%)': round(total_return, 2),
+#             'Buy & Hold Return (%)': round(buy_hold_return, 2),
+#             'Difference (%)': round(difference, 2),
+#             'Total Cost': round(total_cost, 2),
+#             'Win Rate (%)': round(win_rate, 2),
+#             'Win Count': win_count,
+#             'Loss Count': total_trades - win_count,
+#             'Average Days in Market': round(avg_days_in_market, 2),
+#             'Average Win ($)': round(avg_win_amount, 2),
+#             'Average Loss ($)': round(avg_loss_amount, 2),
+#             'Average Win (%)': round(avg_win_percent, 2),
+#             'Average Loss (%)': round(avg_loss_percent, 2),
+#             'Risk:Reward ($)': round(rr_dollar, 2),
+#             'Risk:Reward (%)': round(rr_percent, 2),
+#             'Best Trade ($)': round(best_trade_pnl, 2),
+#             'Worst Trade ($)': round(worst_trade_pnl, 2),
+#             'Best Trade (%)': round(best_trade_percent, 2),
+#             'Worst Trade (%)': round(worst_trade_percent, 2)
+#         })
+
+#     alert_performance_df = pd.DataFrame(alert_performance_data)
+#     alert_performance_df = alert_performance_df.sort_values('Total PnL', ascending=False)
+
+#     print(f"Alert ID Performance created with {len(alert_performance_df)} alerts")
+#     if len(df_open) > 0:
+#         print(f"Tracking {alert_performance_df['Open Positions'].sum()} total open positions")
+
+#     return alert_performance_df
+
 def create_alert_id_performance(df_closed, df_open):
-    """Enhanced with open position tracking"""
+    """Enhanced with compounded return calculations"""
     if 'Alert ID' not in df_closed.columns or df_closed['Alert ID'].isna().all():
         return pd.DataFrame()
 
@@ -914,6 +826,17 @@ def create_alert_id_performance(df_closed, df_open):
 
         difference = total_return - buy_hold_return
 
+        # NEW: Calculate Compounded Return
+        # Get the final principle value (after last trade)
+        last_principle = last_trade['Principle']
+        # Calculate the return after applying the last trade's return
+        final_principle = last_principle * (1 + last_trade['Return(%)'] / 100)
+        compounded_return_pct = ((final_principle - 100000) / 100000) * 100
+        
+        # NEW: Calculate differences
+        difference_pct = compounded_return_pct - buy_hold_return
+        difference_to_compounded = buy_hold_return - compounded_return_pct
+
         win_data = group_data[group_data['Outcome'] == 'Win']
         loss_data = group_data[group_data['Outcome'] == 'Loss']
 
@@ -938,8 +861,10 @@ def create_alert_id_performance(df_closed, df_open):
             'Total PnL': round(total_pnl, 2),
             'Average Return(%)': round(avg_return, 2),
             'Total Return (%)': round(total_return, 2),
+            'Compounded Return (%)': round(compounded_return_pct, 2),  # NEW
             'Buy & Hold Return (%)': round(buy_hold_return, 2),
-            'Difference (%)': round(difference, 2),
+            'Difference (%)': round(difference_pct, 2),  # NEW: Compounded - Buy&Hold
+            'Difference to Compounded': round(difference_to_compounded, 2),  # NEW
             'Total Cost': round(total_cost, 2),
             'Win Rate (%)': round(win_rate, 2),
             'Win Count': win_count,
@@ -1088,9 +1013,8 @@ def filter_dataframe_by_date(df, start_date=None, end_date=None):
 
 if __name__ == "__main__":
     pr_root = get_project_root()
-    input_file = pr_root / 'clean_up_alerts' / 'inputs' / 'consolidated_alerts_LTD_20251005.csv'
-
-    # Process alerts - Returns 2 DataFrames
+    input_file = pr_root / 'clean_up_alert-main' / 'inputs' / 'consolidated_alerts_LTD_20251005.csv'
+    # input_file = "/workspaces/Edge-Capital-Partners/clean_up_alert-main/inputs/consolidated_alerts_LTD_20251005.csv"    # Process alerts - Returns 2 DataFrames
     df_closed, df_open = process_alerts_to_dataframe(input_file)
 
     # Date filtering
@@ -1105,7 +1029,8 @@ if __name__ == "__main__":
     pivot_tables = create_pivot_tables(df_closed, df_open)
 
     # Save results
-    output_dir = pr_root / 'clean_up_alerts' / 'outputs'
+    output_dir = pr_root / 'clean_up_alert-main' / 'outputs'
+    # output_dir="/workspaces/Edge-Capital-Partners/clean_up_alert-main/outputs"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     date_suffix = ""
