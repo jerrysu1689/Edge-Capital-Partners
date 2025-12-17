@@ -680,8 +680,10 @@ def create_formatted_excel_pivot(df, writer, sheet_name='Pivot'):
     return pivot_df
 
 
+
+
 # def create_alert_id_performance(df_closed, df_open):
-#     """Enhanced with open position tracking"""
+#     """Enhanced with compounded return calculations"""
 #     if 'Alert ID' not in df_closed.columns or df_closed['Alert ID'].isna().all():
 #         return pd.DataFrame()
 
@@ -727,6 +729,17 @@ def create_formatted_excel_pivot(df, writer, sheet_name='Pivot'):
 
 #         difference = total_return - buy_hold_return
 
+#         # NEW: Calculate Compounded Return
+#         # Get the final principle value (after last trade)
+#         last_principle = last_trade['Principle']
+#         # Calculate the return after applying the last trade's return
+#         final_principle = last_principle * (1 + last_trade['Return(%)'] / 100)
+#         compounded_return_pct = ((final_principle - 100000) / 100000) * 100
+        
+#         # NEW: Calculate differences
+#         difference_pct = compounded_return_pct - buy_hold_return
+#         difference_to_compounded = buy_hold_return - compounded_return_pct
+
 #         win_data = group_data[group_data['Outcome'] == 'Win']
 #         loss_data = group_data[group_data['Outcome'] == 'Loss']
 
@@ -751,8 +764,10 @@ def create_formatted_excel_pivot(df, writer, sheet_name='Pivot'):
 #             'Total PnL': round(total_pnl, 2),
 #             'Average Return(%)': round(avg_return, 2),
 #             'Total Return (%)': round(total_return, 2),
+#             'Compounded Return (%)': round(compounded_return_pct, 2),  # NEW
 #             'Buy & Hold Return (%)': round(buy_hold_return, 2),
-#             'Difference (%)': round(difference, 2),
+#             'Difference (%)': round(difference_pct, 2),  # NEW: Compounded - Buy&Hold
+#             'Difference to Compounded': round(difference_to_compounded, 2),  # NEW
 #             'Total Cost': round(total_cost, 2),
 #             'Win Rate (%)': round(win_rate, 2),
 #             'Win Count': win_count,
@@ -780,7 +795,7 @@ def create_formatted_excel_pivot(df, writer, sheet_name='Pivot'):
 #     return alert_performance_df
 
 def create_alert_id_performance(df_closed, df_open):
-    """Enhanced with compounded return calculations"""
+    """Enhanced with compounded return calculations and new metrics"""
     if 'Alert ID' not in df_closed.columns or df_closed['Alert ID'].isna().all():
         return pd.DataFrame()
 
@@ -810,11 +825,8 @@ def create_alert_id_performance(df_closed, df_open):
         win_rate = (win_count / total_trades) * 100 if total_trades > 0 else 0
         avg_days_in_market = group_data['Average Day in the Market'].mean()
 
-        first_trade_cost = first_trade['Cost']
-        if first_trade_cost > 0:
-            total_return = (total_pnl / first_trade_cost) * 100
-        else:
-            total_return = 0
+        # UPDATED: Total Return = Sum of all Return(%)
+        total_return = group_data['Return(%)'].sum()
 
         first_open_price = first_trade['Open']
         last_close_price = last_trade['Closing']
@@ -824,18 +836,36 @@ def create_alert_id_performance(df_closed, df_open):
         else:
             buy_hold_return = 0
 
-        difference = total_return - buy_hold_return
-
-        # NEW: Calculate Compounded Return
-        # Get the final principle value (after last trade)
+        # Calculate Compounded Return
         last_principle = last_trade['Principle']
-        # Calculate the return after applying the last trade's return
         final_principle = last_principle * (1 + last_trade['Return(%)'] / 100)
         compounded_return_pct = ((final_principle - 100000) / 100000) * 100
         
-        # NEW: Calculate differences
-        difference_pct = compounded_return_pct - buy_hold_return
-        difference_to_compounded = buy_hold_return - compounded_return_pct
+        # RENAMED: Total - Buy & Hold (%)
+        total_minus_buyhold = total_return - buy_hold_return
+        
+        # RENAMED: Compounded - Buy & Hold (%)
+        compounded_minus_buyhold = compounded_return_pct - buy_hold_return
+
+        # NEW CALCULATIONS
+        # 3. Total Time in Market
+        total_time_in_market = avg_days_in_market * total_trades
+
+        # 4. Buy & Hold # of Days (calendar days between first and last trade)
+        try:
+            first_date = datetime.strptime(first_trade['Trading Date'], '%Y-%m-%d')
+            last_date = datetime.strptime(last_trade['Closing Date'], '%Y-%m-%d')
+            buyhold_days = (last_date - first_date).days
+        except:
+            buyhold_days = 0
+
+        # 5. Time Utilization Ratio
+        time_utilization = (total_time_in_market / buyhold_days) if buyhold_days > 0 else 0
+
+        # 6. Beta Comparison
+        # Compounded - Buy & Hold (%) - [Buy & Hold Return (%) × Time Utilization]
+        adjusted_buyhold = buy_hold_return * time_utilization
+        beta_comparison = compounded_minus_buyhold - adjusted_buyhold
 
         win_data = group_data[group_data['Outcome'] == 'Win']
         loss_data = group_data[group_data['Outcome'] == 'Loss']
@@ -860,16 +890,20 @@ def create_alert_id_performance(df_closed, df_open):
             'Open Positions': open_count,
             'Total PnL': round(total_pnl, 2),
             'Average Return(%)': round(avg_return, 2),
-            'Total Return (%)': round(total_return, 2),
-            'Compounded Return (%)': round(compounded_return_pct, 2),  # NEW
+            'Total Return (%)': round(total_return, 2),  # UPDATED calculation
+            'Compounded Return (%)': round(compounded_return_pct, 2),
             'Buy & Hold Return (%)': round(buy_hold_return, 2),
-            'Difference (%)': round(difference_pct, 2),  # NEW: Compounded - Buy&Hold
-            'Difference to Compounded': round(difference_to_compounded, 2),  # NEW
+            'Total - Buy & Hold (%)': round(total_minus_buyhold, 2),  # RENAMED
+            'Compounded - Buy & Hold (%)': round(compounded_minus_buyhold, 2),  # RENAMED
             'Total Cost': round(total_cost, 2),
             'Win Rate (%)': round(win_rate, 2),
             'Win Count': win_count,
             'Loss Count': total_trades - win_count,
             'Average Days in Market': round(avg_days_in_market, 2),
+            'Total Time in Market': round(total_time_in_market, 2),  # NEW
+            'Buy & Hold # of Days': buyhold_days,  # NEW
+            'Time Utilization Ratio': round(time_utilization, 4),  # NEW (4 decimals for precision)
+            'Beta Comparison': round(beta_comparison, 2),  # NEW
             'Average Win ($)': round(avg_win_amount, 2),
             'Average Loss ($)': round(avg_loss_amount, 2),
             'Average Win (%)': round(avg_win_percent, 2),
